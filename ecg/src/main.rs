@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{anyhow, bail};
+use anyhow::{anyhow, bail, Context};
 use clap::{Parser, Subcommand};
 use colored::Colorize;
 use defmt_decoder::{DecodeError, Frame, Locations, StreamDecoder};
@@ -45,8 +45,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(config_file) = args.config {
         config.merge(config::File::from(Path::new(&config_file)).required(false))?;
     }
-    config.merge(config::File::from(Path::new("config.toml")).required(false))?;
-    let mut config: Config = config.try_into()?;
+    config
+        .merge(config::File::from(Path::new("config.toml")).required(false))
+        .context("Could not find config")?;
+    let mut config: Config = config.try_into().context("invalid config")?;
     if let Some(chip) = args.probe.chip {
         let chip = Chip::from_str(&chip).map_err(|_| anyhow!("{} not supported", chip))?;
         config.chip = chip;
@@ -61,8 +63,11 @@ fn main() -> anyhow::Result<()> {
     let is_secure = config.images.iter().any(|(_, i)| i.secure);
     args.probe.chip = Some(config.chip.chip_name().to_string());
     if is_secure {
-        config.chip.enable_trustzone()?;
-        config.chip.wipe_chip()?;
+        config
+            .chip
+            .enable_trustzone()
+            .context("could not enable trustzone")?;
+        config.chip.wipe_chip().context("Could not wipe chip")?;
     }
     defmt_decoder::log::init_logger(false, false, move |metadata| {
         if defmt_decoder::log::is_defmt_frame(metadata) {
@@ -80,7 +85,9 @@ fn main() -> anyhow::Result<()> {
             build_graph.add_edge(a, b, 1);
         }
     }
-    let target_path = std::fs::canonicalize(PathBuf::from("./target"))?;
+    let path_buf = PathBuf::from("./target");
+    std::fs::create_dir_all(&path_buf)?;
+    let target_path = std::fs::canonicalize(&path_buf).context("invalid target path")?;
     let mut artifacts: HashMap<String, Artifact> = HashMap::new();
     let nodes = Topo::new(&build_graph)
         .iter(&build_graph)
@@ -102,11 +109,16 @@ fn main() -> anyhow::Result<()> {
             .map(|a| target_path.join(a));
         println!("{} {}", "Building".green().bold(), node.green().bold());
         let node_path = target_path.join(node);
-        std::fs::create_dir_all(node_path.clone())?;
-        let artifact = image.build(node_path, deps)?;
+        std::fs::create_dir_all(node_path.clone()).context("could not create node path")?;
+        let artifact = image
+            .build(node_path, deps)
+            .context("Could not build artifact")?;
         artifacts.insert(node.to_string(), artifact);
     }
-    let mut sess = args.probe.simple_attach()?;
+    let mut sess = args
+        .probe
+        .simple_attach()
+        .context("Could not attach probe")?;
     let flash_opts = FlashOptions {
         disable_double_buffering: false,
         version: false,
@@ -127,25 +139,28 @@ fn main() -> anyhow::Result<()> {
         let artifact = artifacts.get(name.as_str()).unwrap();
         let flash_loader = flash_opts
             .probe_options
-            .build_flashloader(&mut sess, artifact.path())?;
+            .build_flashloader(&mut sess, artifact.path())
+            .context("Could not build flashloader")?;
         probe_rs_cli_util::flash::run_flash_download(
             &mut sess,
             artifact.path(),
             &flash_opts,
             flash_loader,
             false,
-        )?;
+        )
+        .context("Could not run flash download")?;
     }
 
     for name in nodes.iter().rev() {
         match args.cmd {
             Cmd::Run { image: ref n } if name.as_str() == n => {
                 let artifact = artifacts.get(name.as_str()).unwrap();
-                let elf_bytes = std::fs::read(artifact.path())?;
-                let elf = &Elf::parse(&elf_bytes)?;
+                let elf_bytes =
+                    std::fs::read(artifact.path()).context("Could not find ELF artifact")?;
+                let elf = &Elf::parse(&elf_bytes).context("invalid ELF")?;
                 let chip_name = config.chip.chip_name();
                 let target_info = TargetInfo::new(chip_name, elf)?;
-                run_artifact(&target_info, &mut sess, elf)?;
+                run_artifact(&target_info, &mut sess, elf).context("Could not run artifact")?;
             }
             Cmd::Debug { image: ref n } if name.as_str() == n => {}
             _ => {}

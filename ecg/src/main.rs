@@ -25,6 +25,7 @@ use probe_run::{
 };
 use serde::Deserialize;
 use signal_hook::consts::signal;
+use std::thread::sleep;
 use std::{
     collections::BTreeSet,
     io::{self, Write},
@@ -549,6 +550,7 @@ fn setup_logging_channel(
 
             Err(probe_rs_rtt::Error::ControlBlockNotFound) => {
                 log::trace!("Could not attach because the target's RTT control block isn't initialized (yet). retrying");
+                sleep(Duration::from_secs(1));
             }
 
             Err(e) => {
